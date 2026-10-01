@@ -28,12 +28,14 @@ set -E
 : "${REALITY_SERVER_NAMES:=${REALITY_SNI}}" # 逗号分隔的 serverNames 列表
 : "${XRAY_PORT:=443}"                       # 监听端口
 : "${XRAY_CONFIG_PATH:=/usr/local/etc/xray/config.json}" # 服务端配置写入路径
+: "${CLIENT_PARAMS_FILE:=/usr/local/etc/xray/client-params.json}" # 客户端参数保存路径（--show 读取）
 : "${SERVER_IP:=}"                          # 对外 IP（默认自动探测，仅用于生成客户端参数）
 : "${NODE_NAME:=My-VPS}"                    # 客户端节点显示名
 : "${SKIP_INSTALL:=0}"                      # 设为 1 则跳过 Xray 安装（复用已安装的 xray）
 : "${FORCE:=0}"                             # 设为 1 则强制重新生成密钥并覆盖已有配置
 : "${DRY_RUN:=0}"                           # 设为 1 或 --dry-run 仅做环境检查
 : "${GENERATE_LINK:=0}"                     # 设为 1 或 --generate-link 部署后生成 Shadowrocket 链接
+: "${SHOW:=0}"                              # 设为 1 或 --show 仅展示已部署的客户端 VLESS 配置
 : "${QR_OUT:=}"                             # 可选：Shadowrocket 二维码 PNG 输出路径
 
 XRAY_INSTALLER_URL="https://github.com/XTLS/Xray-install/raw/main/install-release.sh"
@@ -87,13 +89,18 @@ reality-deploy 一键部署脚本
   --dry-run                仅做环境检查，不安装/不改系统
   --generate-link          部署后生成 Shadowrocket 节点链接（URI / 二维码）
   --qr-out <路径>          Shadowrocket 二维码 PNG 输出路径（需 qrencode）
+  --show                   仅展示已部署的客户端 VLESS 配置（读取 client-params.json，不改动系统）
   -h, --help               显示本帮助
 
 同名环境变量亦可预设，命令行参数优先级更高。
+查看已部署配置示例: sudo bash deploy.sh --show [--server <IP>] [--qr-out node.png]
 EOF
 }
 
 # ============================ 参数解析 ============================
+# 便捷子命令：直接展示已部署配置
+if [[ "${1:-}" == "show" ]]; then SHOW=1; shift; fi
+
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --sni)           REALITY_SNI="$2"; shift 2;;
@@ -108,6 +115,7 @@ while [[ $# -gt 0 ]]; do
     --dry-run)       DRY_RUN=1; shift;;
     --generate-link) GENERATE_LINK=1; shift;;
     --qr-out)        QR_OUT="$2"; shift 2;;
+    --show)          SHOW=1; shift;;
     -h|--help)       usage; exit 0;;
     *) die "未知参数: $1（使用 -h 查看帮助）";;
   esac
@@ -351,6 +359,9 @@ verify_deployment() {
     [[ -z "$SERVER_IP" ]] && SERVER_IP="$(curl -fsS --max-time 5 ifconfig.me 2>/dev/null || true)"
   fi
 
+  # 持久化客户端参数，供 --show 回看（仅存公钥，不含私钥）
+  save_client_params
+
   echo
   printf '%s========== 部署成功 ==========%s\n' "$C_GRN" "$C_RST"
   echo "请使用以下参数在客户端（Shadowrocket / sing-box / v2rayN）导入节点："
@@ -381,20 +392,107 @@ generate_link() {
   [[ -f "$py" ]] || { log_warn "未找到 $py，跳过链接生成。"; return 0; }
   [[ -n "$SERVER_IP" ]] || { log_warn "无法探测服务器 IP，跳过链接生成；可用 --server 指定。"; return 0; }
 
-  local qr_args=()
-  [[ -n "$QR_OUT" ]] && qr_args=(--qr-out "$QR_OUT")
-
   log_info "生成 Shadowrocket 节点链接…"
-  if ! python3 "$py" \
-        --server "$SERVER_IP" --port "$XRAY_PORT" \
-        --uuid "$UUID" --public-key "$PUBLIC_KEY" --short-id "$SHORT_ID" \
-        --sni "$REALITY_SNI" --name "$NODE_NAME" "${qr_args[@]}"; then
-    log_warn "Shadowrocket 链接生成失败（详见上方输出）。"
+  if [[ -n "$QR_OUT" ]]; then
+    if ! python3 "$py" \
+          --server "$SERVER_IP" --port "$XRAY_PORT" \
+          --uuid "$UUID" --public-key "$PUBLIC_KEY" --short-id "$SHORT_ID" \
+          --sni "$REALITY_SNI" --name "$NODE_NAME" --qr-out "$QR_OUT"; then
+      log_warn "Shadowrocket 链接生成失败（详见上方输出）。"
+    fi
+  else
+    if ! python3 "$py" \
+          --server "$SERVER_IP" --port "$XRAY_PORT" \
+          --uuid "$UUID" --public-key "$PUBLIC_KEY" --short-id "$SHORT_ID" \
+          --sni "$REALITY_SNI" --name "$NODE_NAME"; then
+      log_warn "Shadowrocket 链接生成失败（详见上方输出）。"
+    fi
+  fi
+}
+
+# 持久化客户端参数（仅含公钥，不含服务端私钥），供 --show 复用
+save_client_params() {
+  [[ -n "$UUID" && -n "$PUBLIC_KEY" ]] || return 0
+  install -d -m 755 /usr/local/etc/xray
+  CLIENT_PARAMS_FILE="$CLIENT_PARAMS_FILE" UUID="$UUID" PUBLIC_KEY="$PUBLIC_KEY" \
+  SHORT_ID="$SHORT_ID" REALITY_SNI="$REALITY_SNI" XRAY_PORT="$XRAY_PORT" \
+  SERVER_IP="${SERVER_IP:-}" python3 - "$CLIENT_PARAMS_FILE" <<'PY'
+import json, os
+path = os.sys.argv[1]
+d = {
+    "uuid": os.environ["UUID"],
+    "publicKey": os.environ["PUBLIC_KEY"],
+    "shortId": os.environ["SHORT_ID"],
+    "sni": os.environ["REALITY_SNI"],
+    "port": int(os.environ["XRAY_PORT"]),
+    "server": os.environ.get("SERVER_IP", ""),
+}
+with open(path, "w", encoding="utf-8") as f:
+    json.dump(d, f, indent=2)
+    f.write("\n")
+PY
+  chown root:"${XRAY_GROUP:-root}" "$CLIENT_PARAMS_FILE" 2>/dev/null || chown root "$CLIENT_PARAMS_FILE" 2>/dev/null
+  chmod 600 "$CLIENT_PARAMS_FILE"
+  log_ok "客户端参数已保存至 $CLIENT_PARAMS_FILE（权限 0600，--show 可回看）"
+}
+
+# 直接展示已部署的客户端 VLESS 配置（不改动系统）
+show_config() {
+  # 本函数为只读展示，调用后立即 exit，故直接关闭 nounset，
+  # 规避部分 bash 版本下「local 变量经赋值/重赋值后在 set -u 下被误报 unbound」的已知缺陷。
+  set +u
+  if [[ ! -r "$CLIENT_PARAMS_FILE" ]]; then
+    die "未找到客户端参数文件（$CLIENT_PARAMS_FILE）。请先完成一次完整部署：sudo bash deploy.sh"
+  fi
+  local params
+  params="$(python3 - "$CLIENT_PARAMS_FILE" <<'PY'
+import json, os
+d = json.load(open(os.sys.argv[1], encoding="utf-8"))
+print("UUID=%s" % d["uuid"])
+print("PBK=%s" % d["publicKey"])
+print("SID=%s" % d.get("shortId", ""))
+print("SNI=%s" % d["sni"])
+print("PORT=%s" % d["port"])
+print("SRV=%s" % d.get("server", ""))
+PY
+)"
+  eval "$params"
+
+  local s_server="$SERVER_IP"
+  [[ -z "$s_server" ]] && s_server="$SRV"
+  [[ -z "$s_server" ]] && s_server="$(curl -fsS --max-time 5 https://api.ipify.org 2>/dev/null || true)"
+  [[ -z "$s_server" ]] && s_server="$(curl -fsS --max-time 5 ifconfig.me 2>/dev/null || true)"
+  [[ -z "$s_server" ]] && die "无法确定服务器 IP，请用 --show --server <IP> 指定。"
+
+  log_step "已部署的 VLESS 客户端配置"
+  echo "  服务器地址 : $s_server"
+  echo "  端口       : $PORT"
+  echo "  协议       : VLESS"
+  echo "  flow       : xtls-rprx-vision"
+  echo "  security   : reality"
+  echo "  SNI        : $SNI"
+  echo "  UUID       : $UUID"
+  echo "  public key : $PBK"
+  echo "  short ID   : $SID"
+
+  local py="$SCRIPT_DIR/generate_shadowrocket_link.py"
+  [[ -f "$py" ]] || { log_warn "未找到 $py，跳过链接生成。"; return 0; }
+  log_info "vless:// 导入链接："
+  if [[ -n "$QR_OUT" ]]; then
+    python3 "$py" --server "$s_server" --port "$PORT" --uuid "$UUID" \
+          --public-key "$PBK" --short-id "$SID" --sni "$SNI" --name "$NODE_NAME" --qr-out "$QR_OUT"
+  else
+    python3 "$py" --server "$s_server" --port "$PORT" --uuid "$UUID" \
+          --public-key "$PBK" --short-id "$SID" --sni "$SNI" --name "$NODE_NAME"
   fi
 }
 
 # ============================ 主流程 ============================
 main() {
+  if [[ "$SHOW" == "1" ]]; then
+    show_config
+    exit 0
+  fi
   log_step "reality-deploy 一键部署（SNI=${REALITY_SNI}, 端口=${XRAY_PORT}）"
   check_environment
   install_xray

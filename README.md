@@ -48,8 +48,31 @@ sudo bash deploy.sh --sni www.apple.com --server <你的VPS_IP> --generate-link
 | `--dry-run` | `DRY_RUN=1` | 关 | 仅做环境检查 |
 | `--generate-link` | `GENERATE_LINK=1` | 关 | 部署后生成 Shadowrocket 链接 |
 | `--qr-out <路径>` | `QR_OUT` | – | 二维码 PNG 输出（需 `qrencode`） |
+| `--show` | `SHOW=1` | 关 | **仅展示**已部署的客户端 VLESS 配置与 `vless://` 链接，不改动系统 |
 
 环境变量与命令行参数均可使用，命令行优先级更高。查看全部选项：`sudo bash deploy.sh -h`。
+
+## 回看已部署配置（--show）
+
+部署完成后，客户端参数（UUID / public key / short ID / SNI / 端口）会以 `0600` 权限保存在
+`/usr/local/etc/xray/client-params.json`。无需重新部署，单条命令即可直接把 VLESS 客户端配置与
+`vless://` 导入链接打印出来：
+
+```bash
+# 直接展示（不改动系统）
+sudo bash deploy.sh --show
+
+# 指定对外 IP / 节点名（默认自动探测公网 IP；无网络时可用 --server 指定）
+sudo bash deploy.sh --show --server <你的VPS_IP> --node-name My-VPS
+
+# 同时导出 Shadowrocket 二维码 PNG
+sudo bash deploy.sh --show --qr-out /root/shadowrocket.png
+```
+
+`--show` 只读取已保存的客户端参数文件并生成展示内容，不会触碰 Xray 服务、配置或密钥，可随时反复执行。
+
+> 若尚未部署过（即 `/usr/local/etc/xray/client-params.json` 不存在），`--show` 会给出明确提示并退出，
+> 不会误改系统。请先完成一次完整部署：`sudo bash deploy.sh`。
 
 ## 验收
 
