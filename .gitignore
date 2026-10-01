@@ -1,0 +1,15 @@
+# 生成的真实配置 / 凭据（切勿提交）
+*.generated.json
+config.generated.json
+*.local.json
+
+# 本地环境变量（可放真实参数，但不要提交）
+.env
+.env.*
+
+# Shadowrocket 二维码（含连接凭据）
+shadowrocket-node.png
+*.png
+
+# 系统临时产物
+/tmp/xray-*
